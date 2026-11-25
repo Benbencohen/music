@@ -117,7 +117,7 @@
       <div class="now-playing" id="now-playing">בחר שיר להשמעה</div>
       <div class="progress-row">
         <span class="time" id="cur-time">0:00</span>
-        <input type="range" id="seek" min="0" max="100" value="0" />
+        <input type="range" id="seek" min="0" max="100" step="0.1" value="0" />
         <span class="time" id="dur-time">0:00</span>
       </div>
       <div class="controls">
@@ -133,6 +133,9 @@
   <audio id="audio" preload="metadata"></audio>
 
   <script>
+    const PWD_KEY = "player_pwd";
+    const STATE_KEY = "player_state_v1";
+
     const audio = document.getElementById("audio");
     const loginScreen = document.getElementById("login-screen");
     const loginForm = document.getElementById("login-form");
@@ -154,15 +157,105 @@
     let isShuffle = false;
     let isRepeat = false;
 
+    // מנגנון הגנה לשחזור זמן מדויק והתאוששות מקישור שפג תוקפו
+    let pendingSeekTime = null;
+    let shouldAutoplayOnLoad = false;
+    let lastSaveAt = 0;
+    let hasRetriedError = false;
+
     const fmt = (sec) => {
-      if (!isFinite(sec)) return "0:00";
+      if (!isFinite(sec) || sec < 0) return "0:00";
       const m = Math.floor(sec / 60);
       const s = Math.floor(sec % 60).toString().padStart(2, "0");
       return `${m}:${s}`;
     };
 
-    async function loadTracks(password) {
-      loginError.textContent = "טוען שירים...";
+    function loadSavedState() {
+      try {
+        const raw = localStorage.getItem(STATE_KEY);
+        return raw ? JSON.parse(raw) : null;
+      } catch {
+        return null;
+      }
+    }
+
+    function saveState(force = false) {
+      const now = Date.now();
+      if (!force && now - lastSaveAt < 1500) return;
+      lastSaveAt = now;
+
+      const timeToSave =
+        pendingSeekTime !== null
+          ? pendingSeekTime
+          : Number.isFinite(audio.currentTime)
+          ? audio.currentTime
+          : 0;
+
+      const wasPlaying =
+        pendingSeekTime !== null ? shouldAutoplayOnLoad : !audio.paused;
+
+      const state = {
+        key: currentKey,
+        time: timeToSave,
+        wasPlaying,
+        isShuffle,
+        isRepeat,
+        search: searchInput.value,
+        savedAt: now,
+      };
+
+      try {
+        localStorage.setItem(STATE_KEY, JSON.stringify(state));
+      } catch {
+        // התעלמות במקרה שאחסון הדפדפן חסום
+      }
+    }
+
+    function applySavedPreferences() {
+      const saved = loadSavedState();
+      if (!saved) return;
+      isShuffle = Boolean(saved.isShuffle);
+      isRepeat = Boolean(saved.isRepeat);
+      shuffleBtn.classList.toggle("active-mode", isShuffle);
+      repeatBtn.classList.toggle("active-mode", isRepeat);
+      if (typeof saved.search === "string") {
+        searchInput.value = saved.search;
+      }
+    }
+
+    function updatePositionState() {
+      if (!("mediaSession" in navigator) || !("setPositionState" in navigator.mediaSession)) return;
+      if (!Number.isFinite(audio.duration) || audio.duration <= 0) return;
+      try {
+        navigator.mediaSession.setPositionState({
+          duration: audio.duration,
+          playbackRate: audio.playbackRate || 1,
+          position: Math.min(Math.max(0, audio.currentTime || 0), audio.duration),
+        });
+      } catch {}
+    }
+
+    function setupMediaSession(track) {
+      if (!("mediaSession" in navigator)) return;
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: track.title,
+        artist: track.folder,
+      });
+      navigator.mediaSession.setActionHandler("play", () => audio.play().catch(() => {}));
+      navigator.mediaSession.setActionHandler("pause", () => audio.pause());
+      navigator.mediaSession.setActionHandler("previoustrack", playPrev);
+      navigator.mediaSession.setActionHandler("nexttrack", playNext);
+      navigator.mediaSession.setActionHandler("seekto", (details) => {
+        if (typeof details.seekTime === "number" && Number.isFinite(audio.duration)) {
+          audio.currentTime = Math.min(Math.max(0, details.seekTime), audio.duration);
+          updatePositionState();
+          saveState(true);
+        }
+      });
+    }
+
+    async function loadTracks(password, { recoverPlayback = false } = {}) {
+      if (!recoverPlayback) loginError.textContent = "טוען שירים...";
       try {
         const res = await fetch("/.netlify/functions/tracks", {
           method: "POST",
@@ -171,18 +264,24 @@
         });
         const data = await res.json();
         if (!res.ok) {
-          localStorage.removeItem("player_pwd");
+          localStorage.removeItem(PWD_KEY);
           loginScreen.classList.remove("hidden");
           loginError.textContent = data.error || "שגיאה בכניסה";
           return;
         }
-        localStorage.setItem("player_pwd", password);
+        localStorage.setItem(PWD_KEY, password);
         loginScreen.classList.add("hidden");
         loginError.textContent = "";
         allTracks = data.tracks || [];
         applyFilter();
+
+        if (recoverPlayback) {
+          restoreTrackFromState({ forceAutoplay: true });
+        } else if (!currentKey) {
+          restoreTrackFromState();
+        }
       } catch {
-        loginError.textContent = "שגיאת תקשורת עם השרת";
+        if (!recoverPlayback) loginError.textContent = "שגיאת תקשורת עם השרת";
       }
     }
 
@@ -225,21 +324,51 @@
       });
     }
 
-    function playTrack(track) {
+    function loadTrack(track, { startTime = 0, autoplay = true, scrollIntoView = false } = {}) {
       currentKey = track.key;
-      audio.src = track.url;
-      audio.play();
-      nowPlayingEl.textContent = `${track.title} — ${track.folder}`;
-      renderList();
+      pendingSeekTime = startTime > 0 ? startTime : null;
+      shouldAutoplayOnLoad = autoplay;
 
-      if ("mediaSession" in navigator) {
-        navigator.mediaSession.metadata = new MediaMetadata({
-          title: track.title,
-          artist: track.folder,
-        });
-        navigator.mediaSession.setActionHandler("previoustrack", playPrev);
-        navigator.mediaSession.setActionHandler("nexttrack", playNext);
+      audio.src = track.url;
+      nowPlayingEl.textContent = `${track.title} — ${track.folder}`;
+      curTimeEl.textContent = fmt(startTime);
+      durTimeEl.textContent = "0:00";
+      seekEl.value = 0;
+
+      renderList();
+      setupMediaSession(track);
+
+      if (scrollIntoView) {
+        const activeEl = trackListEl.querySelector(".track-item.active");
+        if (activeEl) activeEl.scrollIntoView({ behavior: "smooth", block: "center" });
       }
+
+      // בלחיצה רגילה על שיר (startTime === 0) מפעילים מיד כדי לשמור על שרשרת הלחיצה במובייל
+      if (autoplay && pendingSeekTime === null) {
+        audio.play().catch(() => {});
+      } else {
+        audio.load();
+      }
+
+      saveState(true);
+    }
+
+    function playTrack(track) {
+      hasRetriedError = false;
+      loadTrack(track, { startTime: 0, autoplay: true });
+    }
+
+    function restoreTrackFromState({ forceAutoplay = false } = {}) {
+      const saved = loadSavedState();
+      if (!saved || !saved.key) return;
+      const track = allTracks.find((t) => t.key === saved.key);
+      if (!track) return;
+
+      loadTrack(track, {
+        startTime: typeof saved.time === "number" ? saved.time : 0,
+        autoplay: forceAutoplay || Boolean(saved.wasPlaying),
+        scrollIntoView: !forceAutoplay,
+      });
     }
 
     function playNext() {
@@ -257,6 +386,7 @@
       if (!filteredTracks.length) return;
       if (audio.currentTime > 3) {
         audio.currentTime = 0;
+        saveState(true);
         return;
       }
       const idx = filteredTracks.findIndex((t) => t.key === currentKey);
@@ -265,45 +395,134 @@
     }
 
     // Audio Events
-    audio.addEventListener("play", () => (playBtn.textContent = "⏸"));
-    audio.addEventListener("pause", () => (playBtn.textContent = "▶"));
+    audio.addEventListener("play", () => {
+      playBtn.textContent = "⏸";
+      if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
+      saveState(true);
+    });
+
+    audio.addEventListener("playing", () => {
+      hasRetriedError = false;
+      updatePositionState();
+    });
+
+    audio.addEventListener("pause", () => {
+      playBtn.textContent = "▶";
+      if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
+      saveState(true);
+    });
+
     audio.addEventListener("timeupdate", () => {
+      if (pendingSeekTime !== null) return;
       curTimeEl.textContent = fmt(audio.currentTime);
       if (audio.duration) seekEl.value = (audio.currentTime / audio.duration) * 100;
+      saveState(false);
     });
-    audio.addEventListener("loadedmetadata", () => (durTimeEl.textContent = fmt(audio.duration)));
-    audio.addEventListener("ended", () => (isRepeat ? audio.play() : playNext()));
+
+    audio.addEventListener("loadedmetadata", () => {
+      durTimeEl.textContent = fmt(audio.duration);
+      if (pendingSeekTime !== null) {
+        const target = Math.min(pendingSeekTime, Math.max(0, audio.duration - 1));
+        audio.currentTime = target;
+        curTimeEl.textContent = fmt(target);
+        if (audio.duration) seekEl.value = (target / audio.duration) * 100;
+        pendingSeekTime = null;
+        if (shouldAutoplayOnLoad) {
+          shouldAutoplayOnLoad = false;
+          audio.play().catch(() => {
+            // אם הדפדפן חסם Autoplay אחרי ריענון, השיר כבר טעון בנקודה המדויקת ללחיצה אחת
+          });
+        }
+      }
+      updatePositionState();
+    });
+
+    audio.addEventListener("seeked", () => {
+      updatePositionState();
+      saveState(true);
+    });
+
+    audio.addEventListener("ended", () => {
+      if (isRepeat) {
+        audio.currentTime = 0;
+        audio.play().catch(() => {});
+      } else {
+        playNext();
+      }
+    });
+
+    // אם קישור חתום פג תוקף בזמן שהטאב היה פתוח — מושך קישורים חדשים וממשיך מאותה נקודה
+    audio.addEventListener("error", () => {
+      if (!currentKey || hasRetriedError) return;
+      const savedPwd = localStorage.getItem(PWD_KEY);
+      if (!savedPwd) return;
+      hasRetriedError = true;
+      saveState(true);
+      loadTracks(savedPwd, { recoverPlayback: true });
+    });
+
+    // שמירה מיידית במעבר אפליקציה / מזעור / סגירת טאב בכרום
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") saveState(true);
+    });
+    window.addEventListener("pagehide", () => saveState(true));
+    window.addEventListener("beforeunload", () => saveState(true));
 
     // UI Events
     playBtn.onclick = () => {
       if (!audio.src && filteredTracks.length) return playTrack(filteredTracks[0]);
-      audio.paused ? audio.play() : audio.pause();
+      if (audio.paused) {
+        audio.play().catch(() => {});
+      } else {
+        audio.pause();
+      }
     };
     document.getElementById("next-btn").onclick = playNext;
     document.getElementById("prev-btn").onclick = playPrev;
 
     seekEl.oninput = () => {
-      if (audio.duration) audio.currentTime = (seekEl.value / 100) * audio.duration;
+      if (audio.duration) {
+        pendingSeekTime = null;
+        audio.currentTime = (seekEl.value / 100) * audio.duration;
+        curTimeEl.textContent = fmt(audio.currentTime);
+      }
     };
 
     shuffleBtn.onclick = () => {
       isShuffle = !isShuffle;
       shuffleBtn.classList.toggle("active-mode", isShuffle);
+      saveState(true);
     };
+
     repeatBtn.onclick = () => {
       isRepeat = !isRepeat;
       repeatBtn.classList.toggle("active-mode", isRepeat);
+      saveState(true);
     };
 
-    searchInput.oninput = applyFilter;
+    searchInput.oninput = () => {
+      applyFilter();
+      saveState(true);
+    };
+
     document.getElementById("refresh-btn").onclick = () => {
-      const saved = localStorage.getItem("player_pwd");
+      const saved = localStorage.getItem(PWD_KEY);
       if (saved) loadTracks(saved);
     };
+
     document.getElementById("logout-btn").onclick = () => {
       audio.pause();
-      localStorage.removeItem("player_pwd");
+      audio.removeAttribute("src");
+      audio.load();
+      currentKey = null;
+      pendingSeekTime = null;
+      localStorage.removeItem(PWD_KEY);
+      localStorage.removeItem(STATE_KEY);
       passwordInput.value = "";
+      nowPlayingEl.textContent = "בחר שיר להשמעה";
+      curTimeEl.textContent = "0:00";
+      durTimeEl.textContent = "0:00";
+      seekEl.value = 0;
       loginScreen.classList.remove("hidden");
     };
 
@@ -312,8 +531,9 @@
       loadTracks(passwordInput.value);
     };
 
-    // כניסה אוטומטית אם הסיסמה כבר שמורה
-    const savedPwd = localStorage.getItem("player_pwd");
+    // אתחול: שחזור העדפות מקומיות וכניסה אוטומטית אם הסיסמה שמורה
+    applySavedPreferences();
+    const savedPwd = localStorage.getItem(PWD_KEY);
     if (savedPwd) loadTracks(savedPwd);
   </script>
 </body>
