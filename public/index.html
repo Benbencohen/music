@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>הנגן שלי</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --card: #181c24;
+      --hover: #222834;
+      --accent: #3b82f6;
+      --text: #f3f4f6;
+      --muted: #9ca3af;
+      --border: #2a3140;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+    body { background: var(--bg); color: var(--text); min-height: 100vh; padding-bottom: 130px; }
+
+    /* Login Overlay */
+    #login-screen {
+      position: fixed; inset: 0; background: var(--bg);
+      display: flex; align-items: center; justify-content: center; z-index: 100; padding: 20px;
+    }
+    .login-box {
+      background: var(--card); border: 1px solid var(--border);
+      padding: 28px; border-radius: 16px; width: 100%; max-width: 340px; text-align: center;
+    }
+    .login-box h1 { font-size: 1.4rem; margin-bottom: 18px; }
+    .login-box input {
+      width: 100%; padding: 12px; border-radius: 10px; border: 1px solid var(--border);
+      background: var(--bg); color: var(--text); font-size: 1rem; margin-bottom: 12px; text-align: center;
+    }
+    .login-box button {
+      width: 100%; padding: 12px; border-radius: 10px; border: none;
+      background: var(--accent); color: #fff; font-size: 1rem; font-weight: 600; cursor: pointer;
+    }
+    #login-error { color: #f87171; font-size: 0.9rem; margin-top: 10px; min-height: 1.2em; }
+
+    /* Main Layout */
+    header {
+      position: sticky; top: 0; background: rgba(15, 17, 21, 0.92); backdrop-filter: blur(10px);
+      padding: 14px 16px; border-bottom: 1px solid var(--border); z-index: 10;
+    }
+    .top-row { display: flex; gap: 10px; align-items: center; max-width: 800px; margin: 0 auto; }
+    #search {
+      flex: 1; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--border);
+      background: var(--card); color: var(--text); font-size: 0.95rem;
+    }
+    .icon-btn {
+      background: var(--card); border: 1px solid var(--border); color: var(--text);
+      padding: 9px 12px; border-radius: 10px; cursor: pointer; font-size: 0.9rem;
+    }
+    .icon-btn:hover { background: var(--hover); }
+
+    #track-list { max-width: 800px; margin: 12px auto; padding: 0 12px; list-style: none; }
+    .track-item {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 12px 14px; border-radius: 10px; cursor: pointer; transition: background 0.15s;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+    }
+    .track-item:hover { background: var(--hover); }
+    .track-item.active { background: rgba(59, 130, 246, 0.18); border-color: var(--accent); }
+    .track-title { font-size: 0.98rem; font-weight: 500; word-break: break-word; }
+    .track-folder { font-size: 0.78rem; color: var(--muted); margin-top: 3px; }
+    .empty-msg { text-align: center; color: var(--muted); margin-top: 40px; }
+
+    /* Sticky Player Bar */
+    .player-bar {
+      position: fixed; bottom: 0; left: 0; right: 0; background: var(--card);
+      border-top: 1px solid var(--border); padding: 12px 16px; z-index: 20;
+    }
+    .player-inner { max-width: 800px; margin: 0 auto; }
+    .now-playing {
+      font-size: 0.9rem; font-weight: 600; white-space: nowrap; overflow: hidden;
+      text-overflow: ellipsis; margin-bottom: 8px; text-align: center;
+    }
+    .progress-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; direction: ltr; }
+    .time { font-size: 0.75rem; color: var(--muted); min-width: 38px; text-align: center; }
+    #seek { flex: 1; accent-color: var(--accent); cursor: pointer; }
+    .controls { display: flex; justify-content: center; align-items: center; gap: 16px; }
+    .ctrl-btn {
+      background: none; border: none; color: var(--text); font-size: 1.25rem;
+      cursor: pointer; padding: 6px 10px; border-radius: 8px;
+    }
+    .ctrl-btn.active-mode { color: var(--accent); }
+    .play-btn {
+      background: var(--accent); color: #fff; width: 44px; height: 44px;
+      border-radius: 50%; font-size: 1.2rem; display: flex; align-items: center; justify-content: center;
+    }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+
+  <div id="login-screen">
+    <form class="login-box" id="login-form">
+      <h1>כניסה לנגן</h1>
+      <input type="password" id="password-input" placeholder="הזן סיסמה" autocomplete="current-password" required />
+      <button type="submit" id="login-btn">התחבר</button>
+      <div id="login-error"></div>
+    </form>
+  </div>
+
+  <header>
+    <div class="top-row">
+      <input type="search" id="search" placeholder="חיפוש שיר או תיקייה..." />
+      <button class="icon-btn" id="refresh-btn" title="רענן רשימה">↻</button>
+      <button class="icon-btn" id="logout-btn" title="התנתק">יציאה</button>
+    </div>
+  </header>
+
+  <ul id="track-list"></ul>
+
+  <div class="player-bar">
+    <div class="player-inner">
+      <div class="now-playing" id="now-playing">בחר שיר להשמעה</div>
+      <div class="progress-row">
+        <span class="time" id="cur-time">0:00</span>
+        <input type="range" id="seek" min="0" max="100" value="0" />
+        <span class="time" id="dur-time">0:00</span>
+      </div>
+      <div class="controls">
+        <button class="ctrl-btn" id="shuffle-btn" title="ערבוב">🔀</button>
+        <button class="ctrl-btn" id="prev-btn" title="הקודם">⏮</button>
+        <button class="ctrl-btn play-btn" id="play-btn" title="נגן/השהה">▶</button>
+        <button class="ctrl-btn" id="next-btn" title="הבא">⏭</button>
+        <button class="ctrl-btn" id="repeat-btn" title="חזרה על שיר">🔁</button>
+      </div>
+    </div>
+  </div>
+
+  <audio id="audio" preload="metadata"></audio>
+
+  <script>
+    const audio = document.getElementById("audio");
+    const loginScreen = document.getElementById("login-screen");
+    const loginForm = document.getElementById("login-form");
+    const passwordInput = document.getElementById("password-input");
+    const loginError = document.getElementById("login-error");
+    const trackListEl = document.getElementById("track-list");
+    const searchInput = document.getElementById("search");
+    const nowPlayingEl = document.getElementById("now-playing");
+    const playBtn = document.getElementById("play-btn");
+    const seekEl = document.getElementById("seek");
+    const curTimeEl = document.getElementById("cur-time");
+    const durTimeEl = document.getElementById("dur-time");
+    const shuffleBtn = document.getElementById("shuffle-btn");
+    const repeatBtn = document.getElementById("repeat-btn");
+
+    let allTracks = [];
+    let filteredTracks = [];
+    let currentKey = null;
+    let isShuffle = false;
+    let isRepeat = false;
+
+    const fmt = (sec) => {
+      if (!isFinite(sec)) return "0:00";
+      const m = Math.floor(sec / 60);
+      const s = Math.floor(sec % 60).toString().padStart(2, "0");
+      return `${m}:${s}`;
+    };
+
+    async function loadTracks(password) {
+      loginError.textContent = "טוען שירים...";
+      try {
+        const res = await fetch("/.netlify/functions/tracks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          localStorage.removeItem("player_pwd");
+          loginScreen.classList.remove("hidden");
+          loginError.textContent = data.error || "שגיאה בכניסה";
+          return;
+        }
+        localStorage.setItem("player_pwd", password);
+        loginScreen.classList.add("hidden");
+        loginError.textContent = "";
+        allTracks = data.tracks || [];
+        applyFilter();
+      } catch {
+        loginError.textContent = "שגיאת תקשורת עם השרת";
+      }
+    }
+
+    function applyFilter() {
+      const q = searchInput.value.trim().toLowerCase();
+      filteredTracks = allTracks.filter(
+        (t) => t.title.toLowerCase().includes(q) || t.folder.toLowerCase().includes(q)
+      );
+      renderList();
+    }
+
+    function renderList() {
+      trackListEl.innerHTML = "";
+      if (!filteredTracks.length) {
+        const empty = document.createElement("li");
+        empty.className = "empty-msg";
+        empty.textContent = "לא נמצאו שירים";
+        trackListEl.appendChild(empty);
+        return;
+      }
+
+      filteredTracks.forEach((track) => {
+        const li = document.createElement("li");
+        li.className = "track-item" + (track.key === currentKey ? " active" : "");
+        li.onclick = () => playTrack(track);
+
+        const info = document.createElement("div");
+        const title = document.createElement("div");
+        title.className = "track-title";
+        title.textContent = track.title;
+
+        const folder = document.createElement("div");
+        folder.className = "track-folder";
+        folder.textContent = track.folder;
+
+        info.appendChild(title);
+        info.appendChild(folder);
+        li.appendChild(info);
+        trackListEl.appendChild(li);
+      });
+    }
+
+    function playTrack(track) {
+      currentKey = track.key;
+      audio.src = track.url;
+      audio.play();
+      nowPlayingEl.textContent = `${track.title} — ${track.folder}`;
+      renderList();
+
+      if ("mediaSession" in navigator) {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: track.title,
+          artist: track.folder,
+        });
+        navigator.mediaSession.setActionHandler("previoustrack", playPrev);
+        navigator.mediaSession.setActionHandler("nexttrack", playNext);
+      }
+    }
+
+    function playNext() {
+      if (!filteredTracks.length) return;
+      if (isShuffle) {
+        const rand = filteredTracks[Math.floor(Math.random() * filteredTracks.length)];
+        return playTrack(rand);
+      }
+      const idx = filteredTracks.findIndex((t) => t.key === currentKey);
+      const next = filteredTracks[(idx + 1) % filteredTracks.length];
+      playTrack(next);
+    }
+
+    function playPrev() {
+      if (!filteredTracks.length) return;
+      if (audio.currentTime > 3) {
+        audio.currentTime = 0;
+        return;
+      }
+      const idx = filteredTracks.findIndex((t) => t.key === currentKey);
+      const prev = filteredTracks[(idx - 1 + filteredTracks.length) % filteredTracks.length];
+      playTrack(prev);
+    }
+
+    // Audio Events
+    audio.addEventListener("play", () => (playBtn.textContent = "⏸"));
+    audio.addEventListener("pause", () => (playBtn.textContent = "▶"));
+    audio.addEventListener("timeupdate", () => {
+      curTimeEl.textContent = fmt(audio.currentTime);
+      if (audio.duration) seekEl.value = (audio.currentTime / audio.duration) * 100;
+    });
+    audio.addEventListener("loadedmetadata", () => (durTimeEl.textContent = fmt(audio.duration)));
+    audio.addEventListener("ended", () => (isRepeat ? audio.play() : playNext()));
+
+    // UI Events
+    playBtn.onclick = () => {
+      if (!audio.src && filteredTracks.length) return playTrack(filteredTracks[0]);
+      audio.paused ? audio.play() : audio.pause();
+    };
+    document.getElementById("next-btn").onclick = playNext;
+    document.getElementById("prev-btn").onclick = playPrev;
+
+    seekEl.oninput = () => {
+      if (audio.duration) audio.currentTime = (seekEl.value / 100) * audio.duration;
+    };
+
+    shuffleBtn.onclick = () => {
+      isShuffle = !isShuffle;
+      shuffleBtn.classList.toggle("active-mode", isShuffle);
+    };
+    repeatBtn.onclick = () => {
+      isRepeat = !isRepeat;
+      repeatBtn.classList.toggle("active-mode", isRepeat);
+    };
+
+    searchInput.oninput = applyFilter;
+    document.getElementById("refresh-btn").onclick = () => {
+      const saved = localStorage.getItem("player_pwd");
+      if (saved) loadTracks(saved);
+    };
+    document.getElementById("logout-btn").onclick = () => {
+      audio.pause();
+      localStorage.removeItem("player_pwd");
+      passwordInput.value = "";
+      loginScreen.classList.remove("hidden");
+    };
+
+    loginForm.onsubmit = (e) => {
+      e.preventDefault();
+      loadTracks(passwordInput.value);
+    };
+
+    // כניסה אוטומטית אם הסיסמה כבר שמורה
+    const savedPwd = localStorage.getItem("player_pwd");
+    if (savedPwd) loadTracks(savedPwd);
+  </script>
+</body>
+</html>
